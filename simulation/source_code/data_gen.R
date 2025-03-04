@@ -510,3 +510,188 @@ data_gen_R2C2 <- function(seed, tp, N,Z_hat){
                   xi = xi, zeta = zeta)
   return(sim.dat)
 }
+
+
+
+######################################
+##########################
+## data simulation function: MNAR ##
+## N: number of subjects; seed: random seed ##
+data_gen_R2C3 <- function(seed, tp, N,Z_hat){
+  set.seed(seed*2024)
+  
+  eps <- 1e-5
+  G <- 15  ## quadrature points
+  w <- gauss.quad(G, 'legendre')$weights
+  node <- gauss.quad(G, 'legendre')$nodes
+  
+  ##to get parameter setting from tp
+  J <- tp$J
+  tnew <- c(0:100)/100
+  mu <- list(
+    f1 = function(t) 10 + 5*t + 5*t^2,
+    f2 = function(t) 10 + sqrt(t), #10 + 10*sqrt(t) + 5*sin(2*pi*t),
+    f3 = function(t) sin(2*pi*t) + cos(2*pi*t) + log(t+1)
+  )
+  
+  mu_tnew <- list(mu1 = mu[[1]](tnew), mu2 = mu[[2]](tnew), mu3 = mu[[3]](tnew))
+  
+  L0 <- 2
+  phi <- list(
+    f1 = function(t) sqrt(2)*sin(pi*t),
+    f2 = function(t) sqrt(2)*cos(pi*t)
+  )
+  
+  L1 <- 1
+  psi <- list(
+    f1 = function(t) sqrt(2)*cos(2*pi*t)
+  )
+  
+  d0 <- tp$d0
+  d1 <- tp$d1
+  
+  beta <- tp$beta
+  omega <- tp$omega
+  
+  logh0 <- tp$logh0
+  gamma_x <- tp$gamma_x
+  gamma_z <- tp$gamma_z ##diff
+  gamma0 <- tp$gamma0 ##
+  gamma11 <- tp$gamma11
+  gamma12 <- tp$gamma12
+  gamma13 <- tp$gamma13
+  
+  xi <- matrix(NA, N, L0)
+  zeta1 <- zeta2 <- zeta3 <- matrix(NA, N, L1)
+  
+  for (l in 1:L0){
+    xi[, l] <- (sqrt(d0[l])*scale(rnorm(N)))[, 1]
+  }
+  
+  for (l in 1:L1){
+    zeta1[, l] <- (sqrt(d1[l])*scale(rnorm(N)))[, 1]
+    zeta2[, l] <- (sqrt(d1[l])*scale(rnorm(N)))[, 1]
+    zeta3[, l] <- (sqrt(d1[l])*scale(rnorm(N)))[, 1]
+  }
+  zeta <- list(zeta1, zeta2, zeta3)
+  ## to generate mu, psi and phi
+  ID <- time <- time.points <- NULL
+  mu_obs <- vector('list', J)
+  phi_obs <- vector('list', L0)
+  psi_obs <- vector('list', L1)
+  for (i in 1:N){
+    tmp.obstime.2 <- sample((1:10)/100, size = 1)
+    tmp.obstime.2 <- tmp.obstime.2 + (0:10)/10
+    if (tmp.obstime.2[11]>max(tnew)) tmp.obstime.2 <- tmp.obstime.2[-11]
+    tmp.obstime.2 <- c(0, tmp.obstime.2) ##sparse observed time
+    
+    time <- c(time, tmp.obstime.2)
+    time.points <- c(time.points, length(tmp.obstime.2))
+    ID <- c(ID, rep(i, length(tmp.obstime.2)))
+    
+    for (j in 1:J) mu_obs[[j]] <- c(mu_obs[[j]], mu_tnew[[j]][tmp.obstime.2*100+1])
+    
+    for (l in 1:L0) phi_obs[[l]] <- c(phi_obs[[l]], phi[[l]](tmp.obstime.2))
+    for (l in 1:L1) psi_obs[[l]] <- c(psi_obs[[l]], psi[[l]](tmp.obstime.2))
+  }
+  
+  s.time.points <- sum(time.points) ##total observed time points
+  phi_obs_mat <- matrix(NA, s.time.points, L0)
+  psi_obs_mat <- matrix(NA, s.time.points, L1)
+  for (l in 1:L0) phi_obs_mat[, l] <- phi_obs[[l]]
+  for (l in 1:L1) psi_obs_mat[, l] <- psi_obs[[l]]
+  
+  ### to generate Y
+  Y <- true.Y <- err <- vector('list', J)
+  for (j in 1:J) err[[j]] <- rnorm(s.time.points, 0, omega[j])
+  
+  for (i in 1:s.time.points){
+    for (j in 1:J){
+      tmp.Y <- mu_obs[[j]][i] + beta[j]*(sum(xi[ID[i], ]*phi_obs_mat[i, ]) + 
+                                           sum(zeta[[j]][ID[i], ]*psi_obs_mat[i, ]))
+      true.Y[[j]] <- c(true.Y[[j]], tmp.Y)
+      Y[[j]] <- c(Y[[j]], tmp.Y + err[[j]][i])
+    }
+  }
+  
+  long.dat <- data.frame(ID = ID, time = time, 
+                         y1 = Y[[1]], y2 = Y[[2]], y3 = Y[[3]])
+  # browser()
+  ###to generate survival data
+  C <- runif(N, 0, 1.6)   ## censoring time
+  C <- pmin(C, rep(max(tnew), N))
+  # browser()
+  surv.dat <- data.frame(ID = rep(1:N), 
+                         x = rbinom(N, 2, 0.4), 
+                         z_hat = list(Z_hat),
+                         surv_time = rep(NA, N),
+                         status = rep(NA, N))
+  ## to compute event time
+  H <- function(t){
+    f <- function(t) exp(sum(gamma0*xi[i, ]) + sum(gamma11*zeta1[i, ]) + 
+                           sum(gamma12*zeta2[i, ]) + 
+                           sum(gamma13*zeta3[i, ])
+    )
+    sum.approx <- sum(w*f(t/2*node + t/2))
+    return(exp(logh0 + 
+                 surv.dat$x[i]*gamma_x +
+                 sum(surv.dat[i, 3:(3+n_factors-1)]* gamma_z) ##diff
+    )*t/2*sum.approx)
+  }
+  
+  for (i in 1:N){
+    Ht <- NULL
+    for (t in tnew) Ht <- c(Ht, H(t))
+    
+    flag <- FALSE
+    t0 <- 0; t1 <- 1; ## lower and upper bound for root
+    ti <- Inf;
+    Si <- runif(1, 0, 1) ## survival probability
+    
+    while (t1-t0>eps){
+      root_seq <- seq(t0, t1, by = (t1-t0)/10)
+      for (j in 1:10){
+        Hi_left <- H(root_seq[j]) + log(Si)
+        Hi_right <- H(root_seq[j+1]) + log(Si)
+        ## whether we find a solution falls into (root_seq[j], root_seq[j+1])
+        if (Hi_left*Hi_right<0){  
+          t0 = root_seq[j]; t1 = root_seq[j+1]; flag <- TRUE
+          ti <- (t1+t0)/2; break ## set ti as mid point as (t1 and t0)
+        }
+      }
+      ## no solution found in interval (0, 1)
+      if (flag==FALSE) break;
+    }
+    
+    surv.dat$surv_time[i] <- min(ti, C[i]) ## observed survival time
+    surv.dat$status[i] <- as.integer(ti<C[i])
+  }
+  
+  long.dat2 <- long.dat[0, ]
+  for (i in 1:N){
+    tmp.long.dat <- long.dat[which(long.dat$ID==i), ]
+    tmp.surv.time <- surv.dat$surv_time[i]
+    index <- which(tmp.long.dat$time<=tmp.surv.time)
+    long.dat2 <- rbind(long.dat2, tmp.long.dat[index, ])
+  }
+  
+  ID = long.dat2$ID
+  
+  ## Generate missingness ##
+  inv_logit <- function(x) return(1/(1+exp(-x)))
+  long.dat3 <- long.dat2
+  for (i in 1:nrow(long.dat2)){
+    p_missing <- c(inv_logit( 0.5*(10 - long.dat2$y1[i]) ), 
+                   inv_logit( 0.5*(8 - long.dat2$y2[i]) ), 
+                   inv_logit( 0.5*(long.dat2$y3[i] - 2) ) )
+    I_missing <- rbinom(3, 1, p_missing)
+    if (I_missing[1]==1) long.dat3$y1[i] <- NA
+    if (I_missing[2]==1) long.dat3$y2[i] <- NA
+    if (I_missing[3]==1) long.dat3$y3[i] <- NA
+  }
+  
+  sim.dat <- list(long = long.dat3, surv = surv.dat, 
+                  phi_obs_mat = phi_obs_mat, psi_obs_mat = psi_obs_mat, 
+                  xi = xi, zeta = zeta)
+  return(sim.dat)
+}
